@@ -26,7 +26,7 @@ def create_lvm_snapshot(lvPath, snap=None, cmd=['lvcreate', '--size', '1G', '-s'
 
 def cp_snapshot_to_zfs(lvSnapPath, zfsPath, zfsName, snap=None, mountDir='/root/zgit',
                        mountCmd=['mount', '-o', 'ro'],
-                       rsyncCmd=['rsync', '-av', '--delete'], **kwargs):
+                       rsyncCmd=['rsync', '-a', '--delete'], **kwargs):
     'copy an LVM snapshot to ZFS snapshot'
     if snap is None:
         snap = os.path.basename(lvSnapPath)
