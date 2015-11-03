@@ -57,6 +57,9 @@ def create_snapshot(fs, snap=None, commitMsg=None, cmd=['zfs', 'snapshot']):
     subprocess.check_call(cmd + [name])
     return name
 
+def create_filesystem(zfsname, cmd=['zfs', 'create']):
+    'create the ZFS filesystem zfsname'
+    subprocess.check_call(cmd + [zfsname])
 
 def push_incremental(src, dest, oldsnap, newsnap, cmd='zfs send -i %s %s|zfs receive %s'):
     '''push newsnap as incremental update from old snap to dest filesystem.
@@ -126,20 +129,35 @@ def sync_ff(src, dest, snapshotDict=None):
         
 
     
-def read_json_map(path=MAPPATH, autoCreate=True):
-    'read map file of format {SRC:[DEST1, DEST2,...], SRC:[DEST1,...]}'
+def read_json_config(path=MAPPATH, autoCreate=True):
+    'read config dict'
     path = os.path.expanduser(path)
     try:
         with open(path, 'r') as ifile:
-            return json.load(ifile)['backupMap']
+            return json.load(ifile)
     except IOError:
-        return {}
+        if autoCreate:
+            return dict(backupMap={})
+        else:
+            raise
 
-def write_json_map(backupMap, path=MAPPATH):
-    'write map file of format {SRC:[DEST1, DEST2,...], SRC:[DEST1,...]}'
+def read_json_map(path=MAPPATH, autoCreate=True):
+    'get map dict {SRC:[DEST1, DEST2,...], SRC:[DEST1,...]}'
+    return read_json_config(path, autoCreate)['backupMap']
+
+def write_json_config(configDict, path=MAPPATH):
+    'write config dict'
     path = os.path.expanduser(path)
     with open(path, 'w') as ifile:
-        json.dump(dict(backupMap=backupMap), ifile)
+        json.dump(configDict, ifile)
+
+def write_json_map(backupMap, path=MAPPATH):
+    'write backup map dict {SRC:[DEST1, DEST2,...], SRC:[DEST1,...]}'
+    path = os.path.expanduser(path)
+    configDict = read_json_config(path)
+    configDict['backupMap'] = backupMap # update backupMap while retaining other data
+    write_json_config(configDict, path)
+
 
 def add_backup_mapping(src, dest, remote='backup', backupMap=None,
                        snapshotDict=None):
