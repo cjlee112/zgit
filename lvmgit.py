@@ -117,6 +117,8 @@ def init_cmd(args):
     if not args.lvmpath or not args.zfsname:
         raise ValueError('--lvmpath and --zfsname required for init!')
     add_lv(configDict, args.lvmpath, args.zfsname)
+    zgit.do_init(args.zfsname, configDict['backupMap'])
+    zgit.write_json_config(configDict) # save new mapping
     
 if __name__ == '__main__':
     args = get_args()
