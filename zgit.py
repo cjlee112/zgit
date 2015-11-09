@@ -14,15 +14,15 @@ def datesnap_name(dt=None, fmt='%y%m%d%H%M'):
     return dt.strftime(fmt)
 
 def get_snapshot_dict(cmd=['zfs', 'list', '-H', '-t', 'snapshot', '-o',
-                           'name,guid,org.zgit:commitmsg']):
+                           'name,guid,creation,org.zgit:commitmsg']):
     'get dict of file systems each with time-ordered list of snapshots'
     d = {}
     for s in subprocess.check_output(cmd).split('\n')[:-1]:
-        name, guid, commitMsg = s.split('\t')
+        name, guid, creation, commitMsg = s.split('\t')
         if commitMsg == '-':
             commitMsg = None
         fs, snap = name.split('@')
-        d.setdefault(fs, []).append((snap, guid, commitMsg))
+        d.setdefault(fs, []).append((snap, guid, creation, commitMsg))
     return d
 
 def get_snapshot_map(snapshotDict):
@@ -53,7 +53,7 @@ def create_snapshot(fs, snap=None, commitMsg=None, cmd=['zfs', 'snapshot']):
         snap = datesnap_name()
     name = fs + '@' + snap
     if commitMsg:
-        cmd = cmd + ['-o', 'org.zgit:commitMsg=%s' % commitMsg]
+        cmd = cmd + ['-o', 'org.zgit:commitmsg=%s' % commitMsg]
     subprocess.check_call(cmd + [name])
     return name
 
@@ -301,11 +301,12 @@ def status_cmd():
     src = get_zfs_name()
     return do_status(src)
 
-def commit_if_changed(src, dests=None, nmax=None):
+def commit_if_changed(src, dests=None, nmax=None,
+                      commitMsg='backup latest changes'):
     'if changed, commit and backup'
     diffs = diff_snapshot(src)
     if diffs:
-        snap = create_snapshot(src)
+        snap = create_snapshot(src, commitMsg=commitMsg)
         print 'Committed snapshot %s' % snap
 
 def do_syncs(src, dests, nmax=None):
@@ -361,6 +362,59 @@ def map_cmd():
     for pair, snaps in mapData:
         print '%s, %s share %d commits' % (pair[0], pair[1], len(snaps))
         
+def get_clone_args():
+    parser = get_base_parser()
+    parser.add_argument('origin', help='ZFS path to clone')
+    parser.add_argument('dest', help='path to create new clone', default='//')
+    return parser.parse_args()
+
+def clone_cmd():
+    'clone a ZFS repo and record it as origin of new copy'
+    args = get_clone_args()
+    if args.dest == '//': # default to basename of origin
+        dest = get_zfs_name() + '/' + os.path.basename(args.origin)
+    else:
+        dest = args.dest
+    snapshotDict = get_snapshot_dict()
+    src = args.origin
+    push_root(src, dest, snapshotDict[src][0][0]) # push first snapshot
+    update_dest(src, dest) # update to match src HEAD
+    backupMap = read_json_map()
+    add_backup_mapping(dest, src, 'origin', backupMap) # add src as origin of dest
+    write_json_map(backupMap)
+    return 0
+    
+def log_cmd(fmt='''commit %(guid)s (ZFS snapshot %(snap)s)
+Author: %(author)s
+Date:   %(creation)s
+
+    %(commitMsg)s
+'''):
+    'print git-style log of commits'
+    src = get_zfs_name()
+    snapshotDict = get_snapshot_dict()
+    snaps = snapshotDict[src]
+    for i in range(len(snaps) - 1, -1, -1):
+        snap, guid, creation, commitMsg = snaps[i]
+        print fmt % dict(snap=snap, guid=guid, creation=creation,
+                         author='(not recorded)', commitMsg=commitMsg)
+    return 0
+
+def get_commit_args():
+    parser = get_base_parser()
+    parser.add_argument('-m', '--message', help='commit message')
+    return parser.parse_args()
+
+def commit_cmd():
+    'git-style commit saves ZFS snapshot'
+    args = get_commit_args()
+    commitMsg = args.message
+    if not commitMsg:
+        commitMsg = raw_input('Enter a commit message: ')
+    src = get_zfs_name()
+    snap = create_snapshot(src, commitMsg=commitMsg)
+    print 'Committed snapshot %s' % snap
+    
 def run_all(func=do_status):
     backupMap = read_json_map()
     for src,dests in backupMap.items():
@@ -384,10 +438,20 @@ if __name__ == '__main__':
         else:
             status = status_cmd()
     elif len(sys.argv) > 1 and sys.argv[1] == 'backup':
+        import lvmgit
+        configDict = read_json_config()
+        for lvPath in configDict.get('lvmMap', ()):
+            lvmgit.do_commit(lvPath, configDict) # snapshot LVM to ZFS
         status = run_all(commit_if_changed)
         backup_sources()
     elif len(sys.argv) > 1 and sys.argv[1] == 'map':
         status = map_cmd()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'clone':
+        status = clone_cmd()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'log':
+        status = log_cmd()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'commit':
+        status = commit_cmd()
     elif len(sys.argv) > 1 and sys.argv[1] == 'sync':
         if len(sys.argv) > 2 and sys.argv[2] == '--all':
             status = run_all(do_syncs)
@@ -402,7 +466,10 @@ if __name__ == '__main__':
               push: push to remote
               backup: push all zgit repos to remotes
               sync: sync this (or all) repo(s) with remotes by fast-forward
-              map: find '''
+              clone: clone a repo
+              log: list commits in this repo
+              commit: commit a snapshot of this ZFS file system
+              map: find ZFS filesystems that share common commits'''
         status = 1
     if status:
         sys.exit(status)
