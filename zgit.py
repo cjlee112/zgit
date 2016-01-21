@@ -120,14 +120,12 @@ def sync_ff(src, dest, snapshotDict=None):
         snapshotDict = get_snapshot_dict()
     try:
         snap = update_dest(src, dest, snapshotDict)
+        if snap:
+            print 'pushed %s@%s to %s' % (src, snap, dest)
     except CannotFastForwardError:
         snap = update_dest(dest, src, snapshotDict)
-        src, dest = dest, src
-    if snap:
-        print 'pushed %s@%s to %s' % (src, snap, dest)
-        
-        
-
+        if snap:
+            print 'pulled %s@%s to %s' % (dest, snap, src)
     
 def read_json_config(path=MAPPATH, autoCreate=True):
     'read config dict'
@@ -230,16 +228,19 @@ def get_backup_src(src=None, path=None):
         sys.exit(1)
     return src, backupMap
 
-def do_init(path=MAPPATH):
+def init_cmd(path=MAPPATH):
     'initialize empty map'
     backupMap = read_json_map(path)
     src = get_zfs_name()
-    try:
-        print '%s already initialized for zgit --> %s' % (src, backupMap[src])
-    except KeyError:
-        backupMap[src] = [] # no remotes yet
-        print 'Initialized %s for zgit' % src
-        write_json_map(backupMap)
+    do_init(src, backupMap)
+    write_json_map(backupMap)
+
+def do_init(src, backupMap):
+    if src in backupMap:
+        raise ValueError('%s already initialized for zgit --> %s' % (src, backupMap[src]))
+    backupMap[src] = [] # no remotes yet
+    print 'Initialized %s for zgit' % src
+
 
 def get_push_args():
     parser = get_base_parser()
@@ -340,6 +341,15 @@ def do_remote_remove(src, backupMap):
     args = get_remote_remove_args()
     rm_backup_mapping(src, None, remote=args.remote, backupMap=backupMap)
     write_json_map(backupMap)
+
+def list_remotes(src=None):
+    'list name of remote and zfs path'
+    backupMap = read_json_map()
+    if not src:
+        src = get_zfs_name()
+    for remote, dest in backupMap.get(src, ()):
+        print remote, dest
+
     
 def remote_cmd():
     src, backupMap = get_backup_src()
@@ -347,6 +357,8 @@ def remote_cmd():
         return do_remote_add(src, backupMap)
     elif len(sys.argv) > 2 and sys.argv[2] == 'remove':
         return do_remote_remove(src, backupMap)
+    elif len(sys.argv) == 2:
+        return list_remotes()
     else:
         print '''Usage: zgit remote SUBCOMMAND [args] [options]
         where SUBCOMMAND is:
@@ -354,13 +366,34 @@ def remote_cmd():
               remove REMOTENAME'''
         return 1 # error status
 
+def count_divergences(src, dest, snapshotDict):
+    'return #commits in src vs. dest after last shared commit'
+    try:
+        srcSnaps = snapshotDict[src]
+    except KeyError:
+        return None, None
+    destGUIDs = {}
+    for i,t in enumerate(snapshotDict.get(dest, ())):
+        destGUIDs[t[1]] = i
+    for i in range(len(srcSnaps) - 1, -1, -1): # find last common snapshot
+        try:
+            j = destGUIDs[srcSnaps[i][1]]
+            return len(srcSnaps) - i - 1, len(destGUIDs) - j - 1
+        except KeyError:
+            pass
+    return None, None
+        
 def map_cmd():
     snapshotDict = get_snapshot_dict()
     snapshotMap = get_snapshot_map(snapshotDict)
     mapData = snapshotMap.items()
     mapData.sort(lambda x,y:cmp(len(y[1]), len(x[1]))) # sort longest first
     for pair, snaps in mapData:
-        print '%s, %s share %d commits' % (pair[0], pair[1], len(snaps))
+        i, j = count_divergences(pair[0], pair[1], snapshotDict)
+        if i:
+            print '%s is ahead of %s by %d commits' % (pair[0], pair[1], i)
+        if j:
+            print '%s is ahead of %s by %d commits' % (pair[1], pair[0], j)
         
 def get_clone_args():
     parser = get_base_parser()
@@ -425,7 +458,7 @@ def run_all(func=do_status):
             
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'init':
-        status = do_init()
+        status = init_cmd()
     elif len(sys.argv) > 1 and sys.argv[1] == 'remote':
         status = remote_cmd()
     elif len(sys.argv) > 1 and sys.argv[1] == 'push':
@@ -441,7 +474,7 @@ if __name__ == '__main__':
         import lvmgit
         configDict = read_json_config()
         for lvPath in configDict.get('lvmMap', ()):
-            lvmgit.do_commit(lvPath, configDict) # snapshot LVM to ZFS
+            lvmgit.do_commit(lvPath, configDict=configDict) # snapshot LVM to ZFS
         status = run_all(commit_if_changed)
         backup_sources()
     elif len(sys.argv) > 1 and sys.argv[1] == 'map':
