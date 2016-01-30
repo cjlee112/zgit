@@ -57,6 +57,11 @@ def create_snapshot(fs, snap=None, commitMsg=None, cmd=['zfs', 'snapshot']):
     subprocess.check_call(cmd + [name])
     return name
 
+def destroy_snapshot(fs, snap, cmd=['zfs', 'destroy']):
+    'destroy the snapshot fs@snap'
+    name = fs + '@' + snap
+    subprocess.check_call(cmd + [name])
+
 def create_filesystem(zfsname, cmd=['zfs', 'create']):
     'create the ZFS filesystem zfsname'
     subprocess.check_call(cmd + [zfsname])
@@ -367,7 +372,7 @@ def remote_cmd():
         return 1 # error status
 
 def count_divergences(src, dest, snapshotDict):
-    'return #commits in src vs. dest after last shared commit'
+    'return #commits in src vs. dest after their last shared commit'
     try:
         srcSnaps = snapshotDict[src]
     except KeyError:
@@ -394,6 +399,24 @@ def map_cmd():
             print '%s is ahead of %s by %d commits' % (pair[0], pair[1], i)
         if j:
             print '%s is ahead of %s by %d commits' % (pair[1], pair[0], j)
+        elif i == 0:
+            print '%s and %s are in sync (%d shared commits)' \
+              % (pair[0], pair[1], len(snaps))
+
+def forget_snapshots(src, snapshotDict, keep=4):
+    'delete old snapshots keeping only most recent snapshot(s) specified by keep'
+    deleteSnaps = snapshotDict[src][:-keep]
+    if deleteSnaps:
+        print 'deleting %d old snapshots from %s...' % (len(deleteSnaps), src)
+    for snapInfo in deleteSnaps:
+        destroy_snapshot(src, snapInfo[0])
+
+def forget_cmd():
+    'delete all but most recent snapshots in current ZFS filesystem'
+    snapshotDict = get_snapshot_dict()
+    src = get_zfs_name()
+    forget_snapshots(src, snapshotDict)
+    return 0
         
 def get_clone_args():
     parser = get_base_parser()
@@ -491,10 +514,12 @@ if __name__ == '__main__':
         else:
             src, backupMap = get_backup_src()
             status = do_syncs(src, backupMap[src])
+    elif len(sys.argv) > 1 and sys.argv[1] == 'forget':
+        status = forget_cmd()
     else:
         print '''Usage: zgit COMMAND [args] [options]
         where COMMAND is:
-              init: initialize ~/.zgit
+              init: add this ZFS file system to zgit backup map in %s
               remote: manage remote repos
               push: push to remote
               backup: push all zgit repos to remotes
@@ -502,7 +527,8 @@ if __name__ == '__main__':
               clone: clone a repo
               log: list commits in this repo
               commit: commit a snapshot of this ZFS file system
-              map: find ZFS filesystems that share common commits'''
+              map: find ZFS filesystems that share common commits
+              forget: delete old snapshots in this ZFS file system''' % MAPPATH
         status = 1
     if status:
         sys.exit(status)
