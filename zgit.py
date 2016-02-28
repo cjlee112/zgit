@@ -25,7 +25,7 @@ def get_snapshot_dict(cmd=['zfs', 'list', '-H', '-t', 'snapshot', '-o',
         d.setdefault(fs, []).append((snap, guid, creation, commitMsg))
     return d
 
-def get_snapshot_map(snapshotDict):
+def get_snapshot_map(snapshotDict, backupMap):
     'find mapping between zfs filesystems based on shared snapshots'
     guids = {}
     for src, snaps in snapshotDict.items():
@@ -34,8 +34,12 @@ def get_snapshot_map(snapshotDict):
     snapshotMap = {}
     for guid, srcs in guids.items():
         srcs.sort()
-        for src in srcs[1:]:
-            snapshotMap.setdefault((srcs[0], src), []).append(guid)
+        for refSrc in srcs:
+            if refSrc in backupMap:
+                break
+        otherSrcs = [src for src in srcs if src != refSrc]
+        for src in otherSrcs:
+            snapshotMap.setdefault((refSrc, src), []).append(guid)
     return snapshotMap
         
 
@@ -387,10 +391,18 @@ def count_divergences(src, dest, snapshotDict):
         except KeyError:
             pass
     return None, None
+
+def is_remote_dest(src, dest, backupMap):
+    'is dest a zgit remote of src?'
+    for remote, path in backupMap.get(src, ()):
+        if path == dest:
+            return True
         
 def map_cmd():
+    'print ZFS content mappings based on snapshot GUIDs intersection'
+    backupMap = read_json_map()
     snapshotDict = get_snapshot_dict()
-    snapshotMap = get_snapshot_map(snapshotDict)
+    snapshotMap = get_snapshot_map(snapshotDict, backupMap)
     mapData = snapshotMap.items()
     mapData.sort(lambda x,y:cmp(len(y[1]), len(x[1]))) # sort longest first
     for pair, snaps in mapData:
@@ -402,6 +414,8 @@ def map_cmd():
         elif i == 0:
             print '%s and %s are in sync (%d shared commits)' \
               % (pair[0], pair[1], len(snaps))
+        if not is_remote_dest(pair[0], pair[1], backupMap):
+            print '\tNOT yet added as a zgit remote: you can use "zgit remote add" to do so.\n'
 
 def forget_snapshots(src, snapshotDict, keep=4):
     'delete old snapshots keeping only most recent snapshot(s) specified by keep'
