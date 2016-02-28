@@ -173,6 +173,7 @@ def add_backup_mapping(src, dest, remote='backup', backupMap=None,
         backupMap = {}
     srcSnaps, destSnaps, i, snapshotDict = find_ff_start(src, dest, snapshotDict)
     if destSnaps is None:
+        print 'creating new ZFS remote %s by pushing initial snapshot...' % dest
         push_root(src, dest, snapshotDict[src][0][0])
     backupMap.setdefault(src, []).append((remote, dest))
     return backupMap
