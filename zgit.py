@@ -25,7 +25,20 @@ def get_snapshot_dict(cmd=['zfs', 'list', '-H', '-t', 'snapshot', '-o',
         d.setdefault(fs, []).append((snap, guid, creation, commitMsg))
     return d
 
-def get_snapshot_map(snapshotDict, backupMap):
+
+def sort_sources(srcs, sourceOrder):
+    'sort according to sourceOrder, and the remainder alphabetically'
+    l = []
+    for src in srcs:
+        root = src.split('/')[0]
+        try:
+            l.append((sourceOrder.index(root), src))
+        except ValueError:
+            l.append((len(sourceOrder), src))
+    l.sort()
+    return [t[1] for t in l]
+
+def get_snapshot_map(snapshotDict, backupMap, sourceOrder=()):
     'find mapping between zfs filesystems based on shared snapshots'
     guids = {}
     for src, snaps in snapshotDict.items():
@@ -33,9 +46,11 @@ def get_snapshot_map(snapshotDict, backupMap):
             guids.setdefault(s[1], []).append(src)
     snapshotMap = {}
     for guid, srcs in guids.items():
-        srcs.sort()
-        for refSrc in srcs:
-            if refSrc in backupMap:
+        srcs = sort_sources(srcs, sourceOrder)
+        refSrc = srcs[0] # default to lowest order source
+        for src in srcs:
+            if src in backupMap: # already registered, so use as refSrc
+                refSrc = src
                 break
         otherSrcs = [src for src in srcs if src != refSrc]
         for src in otherSrcs:
@@ -104,12 +119,13 @@ def find_ff_start(src, dest, snapshotDict=None):
 class CannotFastForwardError(ValueError):
     pass
         
-def update_dest(src, dest, snapshotDict=None):
+def update_dest(src, dest, snapshotDict=None, verbose=False):
     'push fast-forward update to bring dest up to date with src'
     srcSnaps, destSnaps, i, snapshotDict = find_ff_start(src, dest, snapshotDict)
     if i is None:
         if destSnaps is None:
-            print 'Warning: destination %s is not available' % dest
+            if verbose:
+                print 'Warning: destination %s is not available' % dest
             return None
         raise CannotFastForwardError('cannot push %s to %s by fast-forward'
                                      % (src, dest))
@@ -203,9 +219,12 @@ def backup_sources(backupMap=None):
     for src, dests in backupMap.items():
         for t in dests:
             remote, dest = t
-            snap = update_dest(src, dest, snapshotDict)
-            if snap:
-                print 'pushed %s@%s to %s' % (src, snap, dest)
+            try:
+                snap = update_dest(src, dest, snapshotDict)
+                if snap:
+                    print 'pushed %s@%s to %s' % (src, snap, dest)
+            except CannotFastForwardError:
+                print 'Cannot push %s to %s by fast-forward; skipping...' % (src, dest)
 
 
 def get_base_parser():
@@ -295,14 +314,19 @@ def get_diff_args():
     return parser.parse_args()
 
 def diff_cmd():
-    'diff vs. snapshot or between 2 snapshots'
+    'print diff vs. snapshot or between 2 snapshots'
     args = get_diff_args()
     src = get_zfs_name()
-    diff_snapshot(src, args.commits)
+    diffs = diff_snapshot(src, args.commits)
+    print_diffs(diffs)
 
 def do_status(src, dests=None, nmax=None):
     'list files that changed vs. last commit'
     diffs = diff_snapshot(src)
+    print_diffs(diffs)
+
+def print_diffs(diffs, nmax=None):
+    'print ZFS diff output as-is'
     for diff in diffs[:nmax]:
         print '\t'.join(diff)
     if nmax and len(diffs) > nmax:
@@ -322,7 +346,10 @@ def commit_if_changed(src, dests=None, nmax=None,
 
 def do_syncs(src, dests, nmax=None):
     for t in dests:
-        sync_ff(src, t[1])
+        try:
+            sync_ff(src, t[1])
+        except CannotFastForwardError:
+            print 'Cannot fast-forward either %s or %s.  Recursive merge not yet supported!' % (src, t[1])
     
 def get_remote_parser():
     parser = get_base_parser()
@@ -399,11 +426,28 @@ def is_remote_dest(src, dest, backupMap):
         if path == dest:
             return True
         
+def get_map_args():
+    parser = get_base_parser()
+    parser.add_argument('--add', action='store_true', help='interactively add to mapping')
+    parser.add_argument('--order', type=str, default='',
+                        help='comma separated list of ZFS pools to prefer as reference')
+    return parser.parse_args()
+
+def add_new_mapping(src, dest, backupMap):
+    'add pair to backup mapping, init if needed'
+    if src not in backupMap:
+        do_init(src, backupMap)
+    remoteName = dest.split('/')[0]
+    add_backup_mapping(src, dest, remoteName, backupMap)
+    write_json_map(backupMap)
+
 def map_cmd():
     'print ZFS content mappings based on snapshot GUIDs intersection'
+    args = get_map_args()
+    sourceOrder = args.order.split(',')
     backupMap = read_json_map()
     snapshotDict = get_snapshot_dict()
-    snapshotMap = get_snapshot_map(snapshotDict, backupMap)
+    snapshotMap = get_snapshot_map(snapshotDict, backupMap, sourceOrder)
     mapData = snapshotMap.items()
     mapData.sort(lambda x,y:cmp(len(y[1]), len(x[1]))) # sort longest first
     for pair, snaps in mapData:
@@ -417,6 +461,10 @@ def map_cmd():
               % (pair[0], pair[1], len(snaps))
         if not is_remote_dest(pair[0], pair[1], backupMap):
             print '\tNOT yet added as a zgit remote: you can use "zgit remote add" to do so.\n'
+            if args.add:
+                doAdd = raw_input('Type Y to add now: ')
+                if doAdd and doAdd.lower()[0] == 'y':
+                    add_new_mapping(pair[0], pair[1], backupMap)
 
 def forget_snapshots(src, snapshotDict, keep=4):
     'delete old snapshots keeping only most recent snapshot(s) specified by keep'
@@ -426,34 +474,56 @@ def forget_snapshots(src, snapshotDict, keep=4):
     for snapInfo in deleteSnaps:
         destroy_snapshot(src, snapInfo[0])
 
+def get_forget_args():
+    parser = get_base_parser()
+    parser.add_argument('--keep', type=int, help='number of latest commits to keep', default=4)
+    return parser.parse_args()
+
+
 def forget_cmd():
     'delete all but most recent snapshots in current ZFS filesystem'
+    args = get_forget_args()
     snapshotDict = get_snapshot_dict()
     src = get_zfs_name()
-    forget_snapshots(src, snapshotDict)
+    forget_snapshots(src, snapshotDict, args.keep)
     return 0
         
 def get_clone_args():
-    parser = get_base_parser()
-    parser.add_argument('origin', help='ZFS path to clone')
-    parser.add_argument('dest', help='path to create new clone', default='//')
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers()
+    cloneP = subparsers.add_parser('clone')
+    cloneP.add_argument('--keep', type=int, default=0,
+                        help='#most recent commits to clone (or 0 for all)')
+    cloneP.add_argument('--many', nargs='*',
+                        help='Multiple ZFS paths to clone')
+    cloneP.add_argument('origin', nargs='?', default=None,
+                        help='ZFS path to clone')
+    cloneP.add_argument('dest', nargs='?', default='//',
+                        help='path to create new clone')
     return parser.parse_args()
 
 def clone_cmd():
-    'clone a ZFS repo and record it as origin of new copy'
+    'clone one or more ZFS repos'
     args = get_clone_args()
-    if args.dest == '//': # default to basename of origin
-        dest = get_zfs_name() + '/' + os.path.basename(args.origin)
-    else:
-        dest = args.dest
-    snapshotDict = get_snapshot_dict()
-    src = args.origin
-    push_root(src, dest, snapshotDict[src][0][0]) # push first snapshot
-    update_dest(src, dest) # update to match src HEAD
     backupMap = read_json_map()
-    add_backup_mapping(dest, src, 'origin', backupMap) # add src as origin of dest
+    snapshotDict = get_snapshot_dict()
+    if args.many:
+        for src in args.many:
+            do_clone(src, args.dest, backupMap, snapshotDict, args.keep)
+    elif args.origin:
+        do_clone(args.origin, args.dest, backupMap, snapshotDict, args.keep)
+    else:
+        raise ValueError('You must supply a ZFS path as origin or --many')
     write_json_map(backupMap)
     return 0
+
+def do_clone(src, dest, backupMap, snapshotDict, keep=0, remoteName='origin'):
+    'clone a ZFS repo and record it as origin of new copy'
+    if dest == '//': # default to basename of origin
+        dest = get_zfs_name() + '/' + src.split('/')[-1]
+    push_root(src, dest, snapshotDict[src][-keep][0]) # push first snapshot
+    update_dest(src, dest, snapshotDict) # update to match src HEAD
+    add_backup_mapping(dest, src, remoteName, backupMap) # add src as origin of dest
     
 def log_cmd(fmt='''commit %(guid)s (ZFS snapshot %(snap)s)
 Author: %(author)s
@@ -514,7 +584,8 @@ if __name__ == '__main__':
         for lvPath in configDict.get('lvmMap', ()):
             lvmgit.do_commit(lvPath, configDict=configDict) # snapshot LVM to ZFS
         status = run_all(commit_if_changed)
-        backup_sources()
+        status = run_all(do_syncs)
+        #backup_sources()
     elif len(sys.argv) > 1 and sys.argv[1] == 'map':
         status = map_cmd()
     elif len(sys.argv) > 1 and sys.argv[1] == 'clone':
