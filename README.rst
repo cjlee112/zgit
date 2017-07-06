@@ -291,6 +291,7 @@ Note that at present, this will only apply a fast-forward merge, NOT a recursive
 
 * it will only fast-forward a repo by adding new commits that occured since its most recent commit.
 * if it contains any uncommitted changes, Zgit sync will again refuse to synchronize it.  At present, you would have to merge these changes manually.
+* ZFS validates the receive of each commit BEFORE making any change in the file system visible, hence any problem in the data transfer will cause the entire sync command to refuse to apply any data changes, and exit with an error message.  This will leave both repos unchanged (no data loss).  Conversely, if the sync command completes with no error, then the fast-forward validated successfully.
 
 Basically, you will never lose data using Zgit sync.
 
