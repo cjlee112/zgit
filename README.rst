@@ -49,7 +49,7 @@ A Work-in-progress: current Zgit commands
 
 As a personal project, Zgit has been developed to meet my own needs, and currently covers only a subset of the Git command schema:
 
-**zgit COMMAND [args] [options]** where COMMAND is:
+**zgit COMMAND [args] [options]** where COMMAND is::
 
               init: add this ZFS file system to zgit backup map in %s
               remote: manage remote repos
