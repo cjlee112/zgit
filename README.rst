@@ -323,6 +323,35 @@ ZFS filesystems are often used to keep backup history, which need not be permane
 
 Note that in order for ZFS (and Zgit) to synchronize two repos, they **must share at least one commit**.  Hence, if you prune too aggressively, you can lose the ability to synchronize vs. remote repos.
 
+What about branch, checkout, pull, fetch and merge?
+----------------------------------------------------
+
+These could be added, but I haven't yet got around to them.  Here's the situation:
+
+* **git pull**: currently a reasonable workaround is to use **zgit sync**; because sync uses fast-forward only, it is "direction safe", i.e. it will automatically do push (to bring remote up-to-date) or pull (to bring local repo up-to-date), in a way that is strictly "additive", i.e. all pre-existing commits (in both local and remote) will still be there after the sync, and it will refuse to overwrite uncommitted changes on either side.
+
+* **git branch**: ZFS supports arbitrary history branching.  The only complication is that by default ZFS wants to mount each new ZFS branch as a new filesystem mount point (whereas Git hides all but the "current" branch exposed as the working tree).  To keep this as Git-like as possible, Zgit could keep branches unmounted by default (except the branch you switch to using the checkout command).  
+
+* **git checkout**: Switching between branches using a simple ZFS unmount/mount operation would be instant, but presumably would fail if the user was "in" the mounted filesystem when they do the checkout (which is the norm for git users).  This implies two possible modes for checkout:
+
+  * switch the mount (FAST, no data has to be written): the user would have to specify the ZFS repo name, something like::
+
+      zgit checkout oddbranch tank/my/zfs/filesystem
+
+  * in-place rollback/send-receive (slow if it has to send/receive a lot of data).  This is what Git does (rewrite data in the working-tree).  However, this seems much less suited to potentially huge file systems, and fails to make use of the fact that ZFS could do checkouts instantly simply by changing what it mounts.
+
+  For obvious reasons, I prefer mode #1.
+
+* **git fetch**: easy to implement once we decide exactly how zgit keeps branches, since fetch is ordinarily just fast-forward?
+
+* **git merge**: universal merge of all file formats is clearly not a reasonable aim.  Git restricts itself to line-formatted text and barfs on line-diff collisions.  My sense is that the right approach is to break this down into a few manageable categories:
+
+  * for git repos, merge them solely using git fetch.  I.e. just fast-forward respective remote branches on both sides, but do not touch the working trees.
+
+  * for text files use a standard 3-way merge tool (let it decide what to reject as unmergeable collision).
+
+  * for other files, treat each file as the collision object, i.e. only allow fast-forward on a per-file basis; changes to the same file are rejected as an unmergeable collision.
+
 
 Some Current Zgit Quirks
 ---------------------------
