@@ -14,9 +14,12 @@ def datesnap_name(dt=None, fmt='%y%m%d%H%M'):
     return dt.strftime(fmt)
 
 def get_snapshot_dict(cmd=['zfs', 'list', '-H', '-t', 'snapshot', '-o',
-                           'name,guid,creation,org.zgit:commitmsg']):
+                           'name,guid,creation,org.zgit:commitmsg'],
+                      cmd1=['zfs', 'list', '-H', '-d', '0', '-o', 'name']):
     'get dict of file systems each with time-ordered list of snapshots'
     d = {}
+    for name in subprocess.check_output(cmd1).split('\n')[:-1]:
+        d[name] = [] # create empty entry for each top-level ZFS filesystem
     for s in subprocess.check_output(cmd).split('\n')[:-1]:
         name, guid, creation, commitMsg = s.split('\t')
         if commitMsg == '-':
@@ -98,7 +101,13 @@ def push_root(src, dest, newsnap, cmd='zfs send %s|zfs receive %s'):
     newname = src + '@' + newsnap
     subprocess.check_call(cmd % (newname, dest), shell=True)
 
-def find_ff_start(src, dest, snapshotDict=None):
+
+def zfs_dest_is_creatable(dest, snapshotDict):
+    'check whether dest root available, so we can create dest'
+    return dest.split('/')[0] in snapshotDict
+
+def find_ff_start(src, dest, snapshotDict=None, createIfMissing=False,
+                  cloneSnap=0):
     'find start point in src to fast-forward update dest'
     if not snapshotDict:
         snapshotDict = get_snapshot_dict()
@@ -107,7 +116,12 @@ def find_ff_start(src, dest, snapshotDict=None):
     try:
         destSnaps = snapshotDict[dest]
     except KeyError: # dest filesystem does not exist
-        return [t[0] for t in srcSnaps], None, None, snapshotDict
+        if createIfMissing and zfs_dest_is_creatable(dest, snapshotDict):
+            print 'Creating %s by pushing initial snapshot...' % dest
+            push_root(src, dest, srcSnaps[cloneSnap][0])
+            destSnaps = snapshotDict[dest] = [srcSnaps[cloneSnap]]
+        else:
+            return [t[0] for t in srcSnaps], None, None, snapshotDict
     destCurrent = destSnaps[-1][1] # last snapshot GUID
     try: # find matching GUID
         ffstart = srcGUIDs.index(destCurrent)
@@ -119,9 +133,11 @@ def find_ff_start(src, dest, snapshotDict=None):
 class CannotFastForwardError(ValueError):
     pass
         
-def update_dest(src, dest, snapshotDict=None, verbose=False):
+def update_dest(src, dest, snapshotDict=None, verbose=False,
+                createIfMissing=False):
     'push fast-forward update to bring dest up to date with src'
-    srcSnaps, destSnaps, i, snapshotDict = find_ff_start(src, dest, snapshotDict)
+    srcSnaps, destSnaps, i, snapshotDict = find_ff_start(src, dest,
+         snapshotDict, createIfMissing)
     if i is None:
         if destSnaps is None:
             if verbose:
@@ -139,16 +155,18 @@ def push_ff(src, dest, ffSnaps):
         push_incremental(src, dest, baseSnap, head)
     return head # report HEAD that was pushed to dest
 
-def sync_ff(src, dest, snapshotDict=None):
+def sync_ff(src, dest, snapshotDict=None, createIfMissing=False):
     'sync src and dest by fast-forward in either direction'
     if snapshotDict is None:
         snapshotDict = get_snapshot_dict()
     try:
-        snap = update_dest(src, dest, snapshotDict)
+        snap = update_dest(src, dest, snapshotDict,
+                           createIfMissing=createIfMissing)
         if snap:
             print 'pushed %s@%s to %s' % (src, snap, dest)
     except CannotFastForwardError:
-        snap = update_dest(dest, src, snapshotDict)
+        snap = update_dest(dest, src, snapshotDict,
+                           createIfMissing=createIfMissing)
         if snap:
             print 'pulled %s@%s to %s' % (dest, snap, src)
     
@@ -183,14 +201,18 @@ def write_json_map(backupMap, path=MAPPATH):
 
 
 def add_backup_mapping(src, dest, remote='backup', backupMap=None,
-                       snapshotDict=None):
+                       snapshotDict=None, deferPush=False):
     'add src -> dest to backupMap, pushing root snapshot if dest does not exist'
     if backupMap is None:
         backupMap = {}
     srcSnaps, destSnaps, i, snapshotDict = find_ff_start(src, dest, snapshotDict)
     if destSnaps is None:
-        print 'creating new ZFS remote %s by pushing initial snapshot...' % dest
-        push_root(src, dest, snapshotDict[src][0][0])
+        if deferPush:
+            print '''Deferring creation of new ZFS remote %s...
+    Note: you MUST provide the --create option to your next zgit sync to create it!''' % dest
+        else:
+            print 'creating new ZFS remote %s by pushing initial snapshot...' % dest
+            push_root(src, dest, snapshotDict[src][0][0])
     backupMap.setdefault(src, []).append((remote, dest))
     return backupMap
 
@@ -227,12 +249,6 @@ def backup_sources(backupMap=None):
                 print 'Cannot push %s to %s by fast-forward; skipping...' % (src, dest)
 
 
-def get_base_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('command', help='git-style command to execute')
-    parser.add_argument('--all', help='run on all backup sources')
-    return parser
-
 
 def get_zfs_name(mountDict=None, path=None):
     'get filesystem name for path, or current dir if not specified'
@@ -257,6 +273,20 @@ def get_backup_src(src=None, path=None):
         sys.exit(1)
     return src, backupMap
 
+
+###############################################################
+# command line parsing
+
+def get_base_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('command', help='git-style command to execute')
+    return parser
+
+
+
+###############################################################
+# init command
+
 def init_cmd(path=MAPPATH):
     'initialize empty map'
     backupMap = read_json_map(path)
@@ -270,6 +300,9 @@ def do_init(src, backupMap):
     backupMap[src] = [] # no remotes yet
     print 'Initialized %s for zgit' % src
 
+
+####################################################################
+# push command
 
 def get_push_args():
     parser = get_base_parser()
@@ -294,6 +327,10 @@ def push_cmd():
         print 'no remote named %s' % args.remote
         return 1
     update_dest(src, dest)
+
+
+##################################################################
+# diff command
 
 def diff_snapshot(src, snaps=(), snapshotDict=None, cmd=['zfs', 'diff', '-H']):
     'get list of changed files vs. snaphot(s)'
@@ -320,6 +357,10 @@ def diff_cmd():
     diffs = diff_snapshot(src, args.commits)
     print_diffs(diffs)
 
+
+#################################################################
+# status command
+
 def do_status(src, dests=None, nmax=None):
     'list files that changed vs. last commit'
     diffs = diff_snapshot(src)
@@ -344,12 +385,26 @@ def commit_if_changed(src, dests=None, nmax=None,
         snap = create_snapshot(src, commitMsg=commitMsg)
         print 'Committed snapshot %s' % snap
 
-def do_syncs(src, dests, nmax=None):
+#########################################################################
+# sync command
+
+def get_sync_args():
+    parser = get_base_parser()
+    parser.add_argument('--all', action='store_true', help='synchronize all zgit-registered filesystems')
+    parser.add_argument('--create', action='store_true', help='create filesystem if missing')
+    return parser.parse_args()
+
+    
+def do_syncs(src, dests, nmax=None, createIfMissing=False):
     for t in dests:
         try:
-            sync_ff(src, t[1])
+            sync_ff(src, t[1], createIfMissing=createIfMissing)
         except CannotFastForwardError:
             print 'Cannot fast-forward either %s or %s.  Recursive merge not yet supported!' % (src, t[1])
+
+
+##########################################################################
+# remote command
     
 def get_remote_parser():
     parser = get_base_parser()
@@ -360,6 +415,7 @@ def get_remote_add_args():
     parser = get_remote_parser()
     parser.add_argument('remote', help='name for new remote')
     parser.add_argument('zfsname', help='ZFS file system name')
+    parser.add_argument('--defer', action='store_true', help='do not actually create remote filesystem at this time')
     return parser.parse_args()
 
 def get_remote_remove_args():
@@ -370,7 +426,8 @@ def get_remote_remove_args():
 def do_remote_add(src, backupMap):
     'zgit remote add command'
     args = get_remote_add_args()
-    add_backup_mapping(src, args.zfsname, args.remote, backupMap)
+    add_backup_mapping(src, args.zfsname, args.remote, backupMap,
+                       deferPush=args.defer)
     write_json_map(backupMap)
     
 def do_remote_remove(src, backupMap):
@@ -402,6 +459,9 @@ def remote_cmd():
               add REMOTENAME ZFSNAME
               remove REMOTENAME'''
         return 1 # error status
+
+#######################################################################
+# map command
 
 def count_divergences(src, dest, snapshotDict):
     'return #commits in src vs. dest after their last shared commit'
@@ -466,6 +526,10 @@ def map_cmd():
                 if doAdd and doAdd.lower()[0] == 'y':
                     add_new_mapping(pair[0], pair[1], backupMap)
 
+
+############################################################################
+# forget command
+
 def forget_snapshots(src, snapshotDict, keep=4):
     'delete old snapshots keeping only most recent snapshot(s) specified by keep'
     deleteSnaps = snapshotDict[src][:-keep]
@@ -487,6 +551,10 @@ def forget_cmd():
     src = get_zfs_name()
     forget_snapshots(src, snapshotDict, args.keep)
     return 0
+
+
+#####################################################################
+# clone command
         
 def get_clone_args():
     parser = argparse.ArgumentParser()
@@ -525,6 +593,10 @@ def do_clone(src, dest, backupMap, snapshotDict, keep=0, remoteName='origin'):
     update_dest(src, dest, snapshotDict) # update to match src HEAD
     add_backup_mapping(dest, src, remoteName, backupMap) # add src as origin of dest
     
+
+########################################################################
+# log command
+
 def log_cmd(fmt='''commit %(guid)s (ZFS snapshot %(snap)s)
 Author: %(author)s
 Date:   %(creation)s
@@ -541,6 +613,10 @@ Date:   %(creation)s
                          author='(not recorded)', commitMsg=commitMsg)
     return 0
 
+
+######################################################################
+# commit command
+
 def get_commit_args():
     parser = get_base_parser()
     parser.add_argument('-m', '--message', help='commit message')
@@ -555,11 +631,14 @@ def commit_cmd():
     src = get_zfs_name()
     snap = create_snapshot(src, commitMsg=commitMsg)
     print 'Committed snapshot %s' % snap
-    
-def run_all(func=do_status):
+
+#########################################################
+# top level command line handling
+
+def run_all(func=do_status, **kwargs):
     backupMap = read_json_map()
     for src,dests in backupMap.items():
-        status = func(src, dests=dests, nmax=10)
+        status = func(src, dests=dests, nmax=10, **kwargs)
         if status:
             return status
     
@@ -595,11 +674,12 @@ if __name__ == '__main__':
     elif len(sys.argv) > 1 and sys.argv[1] == 'commit':
         status = commit_cmd()
     elif len(sys.argv) > 1 and sys.argv[1] == 'sync':
-        if len(sys.argv) > 2 and sys.argv[2] == '--all':
-            status = run_all(do_syncs)
+        args = get_sync_args()
+        if args.all:
+            status = run_all(do_syncs, createIfMissing=args.create)
         else:
             src, backupMap = get_backup_src()
-            status = do_syncs(src, backupMap[src])
+            status = do_syncs(src, backupMap[src], createIfMissing=args.create)
     elif len(sys.argv) > 1 and sys.argv[1] == 'forget':
         status = forget_cmd()
     else:

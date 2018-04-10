@@ -11,7 +11,7 @@ By contrast, ZFS lacks any concept of a "remote repository" or even of a multi-c
 
   zgit push origin master
 
-If you're familiar with using Git, you can instantly start using zgit.
+If you're familiar with using Git, you can instantly start using Zgit.  But under the hood, every Zgit command is being executed by ZFS, not Git, which means it scales in the same massive way that ZFS does.
 
 Zgit as a Large-Scale Backup System
 ------------------------------------------
@@ -81,7 +81,7 @@ In the usual Git way, the clone will be created within the current working direc
   cd /tank
   zgit clone owc3tb/work
 
-will create a cloned ZFS filesystem **tank/work** with a remote named **origin** (pointing to ZFS filesystem **owc3tb/work**.
+will create a new ZFS filesystem **tank/work** as a "local repository" with a remote named **origin** (pointing to ZFS filesystem **owc3tb/work**).  Note that this means **tank/work** is created using zfs send/receive, NOT via *zfs clone* (which is not even possible across separate zpools).  This distinction emphasizes that "clone" means something very different in Git's terminology than in ZFS's terminology (zfs clone = git branch).
 
 You can specify a second argument for where the clone should be created::
 
