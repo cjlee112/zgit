@@ -65,18 +65,34 @@ Client side:
 * merge / pull
 * push
 * gc
-* difftool / mergetool
+* diff / difftool / mergetool
 
 Server side:
 
 * receive
 * update
 
-**Everything else lacks hooks**, e.g. branch, reset, fetch, status, init, log etc.
 
-The lack of a fetch-hook means you cannot decouple ZFS snapshot retrieval (fetch) from checkout (merge) -- the only hook you've got is **git pull**.  One possible solution to this issue is to somehow do a git push to our local repo, which can then run receive/update hooks to do the fetch.  But to start with, zgit repos are all on "master" branch, so git pull is in fact all you need.
+All other Git commands lack hooks
+....................................................................
 
+e.g. branch, add, reset, fetch, status, init, log etc.
 
+How big of a problem does this lack of hooks pose for zfsgit?
+
+* **git fetch**: the lack of a fetch-hook means you cannot decouple ZFS snapshot retrieval (fetch) from checkout (merge) -- the only hook you've got is **git pull**.  One possible solution to this issue is to somehow do a git push to our local repo, which can then run receive/update hooks to do the fetch.  But to start with, zfsgit repos are all on "master" branch, so git pull is in fact all you need.
+
+* **git reset**: since this mainly addresses staging / unstaging, it's not relevant to zfsgit.
+
+* **git branch**: operationally, nothing really needs to happen until you **git checkout**, which fortunately does provide a hook.
+
+* **git status**: we can recommend that people use **git diff** instead because it will list changes in the ZFS checkout.  More to the point, since ZFS has no equivalent for git add / staging, the whole purpose of *git status* is not really relevant to ZFS.
+
+* **git add**: ZFS draws no distinction between "staged" vs. "unstaged" changes, so *git add* is not really relevant.
+
+* **git init**: this is not really relevant for us, because we'll use the zfsgit command directly to create new zfsgit submodules.
+
+* **git log**: actually, this will work fine as-is
 
 
 What Git submodule commands must trigger Zgit actions?
@@ -147,6 +163,16 @@ Working with an actual ZFS repository to push and pull from remotes::
   Mounted now on /home/user/zfsgit/bigdata/HEAD
   $ cd HEAD
   # run lots of computations...
+
+Show what's changed since last commit::
+
+  $ git diff
+  M	bigdata/analyze.config
+  M	bigdata/results/bigtable
+  +	bigdata/results/amazing.dat
+
+Commit our changes (note that ZFS has no concept of staged vs. unstaged changes, so there is no need to use *git add* to stage your changes to commit them)::
+
   $ git commit -m 'made a major breakthrough by doubling the search depth'
   $ git push mini2tb newbranch
   Pushed newbranch to mini2tb/zfsgit/genomics/bigdata/newbranch
