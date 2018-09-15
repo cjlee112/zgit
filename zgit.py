@@ -325,6 +325,7 @@ def get_push_args():
     parser = get_base_parser()
     parser.add_argument('remote', help='name of zgit remote to push to')
     parser.add_argument('branch', help='branch name: either "master" or ZFSNAME')
+    parser.add_argument('--readonly', action='store_true', help='mark remote as readonly archive')
     return parser.parse_args()
 
 def push_cmd():
@@ -343,7 +344,7 @@ def push_cmd():
     if not dest:
         print 'no remote named %s' % args.remote
         return 1
-    update_dest(src, dest)
+    update_dest(src, dest, readonly=args.readonly)
 
 
 ##################################################################
