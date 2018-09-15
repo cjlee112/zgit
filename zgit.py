@@ -380,7 +380,11 @@ def status_cmd():
 def commit_if_changed(src, dests=None, nmax=None,
                       commitMsg='backup latest changes'):
     'if changed, commit and backup'
-    diffs = diff_snapshot(src)
+    try:
+        diffs = diff_snapshot(src)
+    except subprocess.CalledProcessError:
+        print 'WARNING: zfs diff crashed on %s.  Assuming modified.' % src
+        diffs = True
     if diffs:
         snap = create_snapshot(src, commitMsg=commitMsg)
         print 'Committed snapshot %s' % snap
