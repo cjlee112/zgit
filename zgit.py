@@ -7,6 +7,10 @@ import sys
 
 MAPPATH = '~/.zgit_conf.json'
 
+class ZfsReceiveError(ValueError):
+    pass
+        
+
 def datesnap_name(dt=None, fmt='%y%m%d%H%M'):
     'get date string for use as snapshot name'
     if dt is None:
@@ -88,12 +92,22 @@ def create_filesystem(zfsname, cmd=['zfs', 'create']):
     'create the ZFS filesystem zfsname'
     subprocess.check_call(cmd + [zfsname])
 
-def push_incremental(src, dest, oldsnap, newsnap, cmd='zfs send -i %s %s|zfs receive %s'):
+def push_incremental(src, dest, oldsnap, newsnap, cmd='zfs send -i %s %s|zfs receive %s',
+                                            readonly=False):
     '''push newsnap as incremental update from old snap to dest filesystem.
     do not use unless SURE args cannot contain shell injection attack'''
     oldname = src + '@' + oldsnap
     newname = src + '@' + newsnap
-    subprocess.check_call(cmd % (oldname, newname, dest), shell=True)
+    try:
+        subprocess.check_call(cmd % (oldname, newname, dest), shell=True)
+    except subprocess.CalledProcessError:
+        if readonly: # retry push by treating dest as readonly archive
+            subprocess.check_call(['zfs', 'rollback', dest + '@' + oldsnap])
+            subprocess.check_call(['zfs', 'set', 'readonly=on', dest])
+            subprocess.check_call(cmd % (oldname, newname, dest), shell=True)
+        else:
+            raise ZfsReceiveError
+
 
 def push_root(src, dest, newsnap, cmd='zfs send %s|zfs receive %s'):
     '''push newsnap from src to create dest filesystem.
@@ -132,9 +146,9 @@ def find_ff_start(src, dest, snapshotDict=None, createIfMissing=False,
 
 class CannotFastForwardError(ValueError):
     pass
-        
+
 def update_dest(src, dest, snapshotDict=None, verbose=False,
-                createIfMissing=False):
+                createIfMissing=False, readonly=False):
     'push fast-forward update to bring dest up to date with src'
     srcSnaps, destSnaps, i, snapshotDict = find_ff_start(src, dest,
          snapshotDict, createIfMissing)
@@ -145,28 +159,28 @@ def update_dest(src, dest, snapshotDict=None, verbose=False,
             return None
         raise CannotFastForwardError('cannot push %s to %s by fast-forward'
                                      % (src, dest))
-    return push_ff(src, dest, srcSnaps[i:])
+    return push_ff(src, dest, srcSnaps[i:], readonly=readonly)
     
-def push_ff(src, dest, ffSnaps):
+def push_ff(src, dest, ffSnaps, readonly=False):
     'push incremental snapshots to fast-forward dest to match src'
     head = None
     for i,baseSnap in enumerate(ffSnaps[:-1]):
         head = ffSnaps[i + 1]
-        push_incremental(src, dest, baseSnap, head)
+        push_incremental(src, dest, baseSnap, head, readonly=readonly)
     return head # report HEAD that was pushed to dest
 
-def sync_ff(src, dest, snapshotDict=None, createIfMissing=False):
+def sync_ff(src, dest, snapshotDict=None, createIfMissing=False, readonly=False):
     'sync src and dest by fast-forward in either direction'
     if snapshotDict is None:
         snapshotDict = get_snapshot_dict()
     try:
         snap = update_dest(src, dest, snapshotDict,
-                           createIfMissing=createIfMissing)
+                           createIfMissing=createIfMissing, readonly=readonly)
         if snap:
             print 'pushed %s@%s to %s' % (src, snap, dest)
     except CannotFastForwardError:
         snap = update_dest(dest, src, snapshotDict,
-                           createIfMissing=createIfMissing)
+                           createIfMissing=createIfMissing, readonly=readonly)
         if snap:
             print 'pulled %s@%s to %s' % (dest, snap, src)
     
@@ -201,7 +215,7 @@ def write_json_map(backupMap, path=MAPPATH):
 
 
 def add_backup_mapping(src, dest, remote='backup', backupMap=None,
-                       snapshotDict=None, deferPush=False):
+                       snapshotDict=None, deferPush=False, readonly=False):
     'add src -> dest to backupMap, pushing root snapshot if dest does not exist'
     if backupMap is None:
         backupMap = {}
@@ -213,6 +227,9 @@ def add_backup_mapping(src, dest, remote='backup', backupMap=None,
         else:
             print 'creating new ZFS remote %s by pushing initial snapshot...' % dest
             push_root(src, dest, snapshotDict[src][0][0])
+            if readonly:
+                print 'Configuring %s as readonly archive.' % dest
+                subprocess.check_call(['zfs', 'set', 'readonly=on', dest])
     backupMap.setdefault(src, []).append((remote, dest))
     return backupMap
 
@@ -396,15 +413,18 @@ def get_sync_args():
     parser = get_base_parser()
     parser.add_argument('--all', action='store_true', help='synchronize all zgit-registered filesystems')
     parser.add_argument('--create', action='store_true', help='create filesystem if missing')
+    parser.add_argument('--readonly', action='store_true', help='mark remote as readonly archive')
     return parser.parse_args()
 
     
-def do_syncs(src, dests, nmax=None, createIfMissing=False):
+def do_syncs(src, dests, nmax=None, createIfMissing=False, readonly=False):
     for t in dests:
         try:
-            sync_ff(src, t[1], createIfMissing=createIfMissing)
+            sync_ff(src, t[1], createIfMissing=createIfMissing, readonly=readonly)
         except CannotFastForwardError:
             print 'Cannot fast-forward either %s or %s.  Recursive merge not yet supported!' % (src, t[1])
+        except ZfsReceiveError:
+            print 'ERROR: sync skipped. Consider using --readonly option'
 
 
 ##########################################################################
@@ -420,6 +440,7 @@ def get_remote_add_args():
     parser.add_argument('remote', help='name for new remote')
     parser.add_argument('zfsname', help='ZFS file system name')
     parser.add_argument('--defer', action='store_true', help='do not actually create remote filesystem at this time')
+    parser.add_argument('--readonly', action='store_true', help='mark remote as readonly archive')
     return parser.parse_args()
 
 def get_remote_remove_args():
@@ -431,7 +452,7 @@ def do_remote_add(src, backupMap):
     'zgit remote add command'
     args = get_remote_add_args()
     add_backup_mapping(src, args.zfsname, args.remote, backupMap,
-                       deferPush=args.defer)
+                       deferPush=args.defer, readonly=args.readonly)
     write_json_map(backupMap)
     
 def do_remote_remove(src, backupMap):
@@ -680,10 +701,10 @@ if __name__ == '__main__':
     elif len(sys.argv) > 1 and sys.argv[1] == 'sync':
         args = get_sync_args()
         if args.all:
-            status = run_all(do_syncs, createIfMissing=args.create)
+            status = run_all(do_syncs, createIfMissing=args.create, readonly=args.readonly)
         else:
             src, backupMap = get_backup_src()
-            status = do_syncs(src, backupMap[src], createIfMissing=args.create)
+            status = do_syncs(src, backupMap[src], createIfMissing=args.create, readonly=args.readonly)
     elif len(sys.argv) > 1 and sys.argv[1] == 'forget':
         status = forget_cmd()
     else:
