@@ -33,6 +33,17 @@ def get_snapshot_dict(cmd=['zfs', 'list', '-H', '-t', 'snapshot', '-o',
     return d
 
 
+def find_snapshot(fs, snap, snapshotDict=None):
+    'return index of snap in time-ordered list of snapshots for fs'
+    if not snapshotDict:
+        snapshotDict = get_snapshot_dict()
+    snaps = snapshotDict[fs]
+    for i, t in enumerate(snaps):
+        if t[0] == snap:
+            return i, snaps
+    raise KeyError
+
+
 def sort_sources(srcs, sourceOrder):
     'sort according to sourceOrder, and the remainder alphabetically'
     l = []
