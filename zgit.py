@@ -43,6 +43,28 @@ def find_snapshot(fs, snap, snapshotDict=None):
             return i, snaps
     raise KeyError
 
+def zfs_send_cmd(zfs, snap, rootcommit=False, snapshotDict=None):
+    'get fromsnap, cmd for zfs send zfs@snap'
+    newsnap = '%s@%s' % (zfs, snap)
+    i, snaps = find_snapshot(zfs, snap, snapshotDict)
+    if rootcommit or i == 0: # full send
+        return None, ['zfs', 'send', newsnap]
+    else: # incremental send
+        fromsnap =  snaps[i - 1][0]
+        return fromsnap, ['zfs', 'send', '-i', '%s@%s' % (zfs, fromsnap), newsnap]
+
+
+def zfs_receive_cmd(zfs):
+    'get cmd for zfs receive'
+#    if not snapshotDict:
+#        snapshotDict = get_snapshot_dict()
+#    if fromsnap: # make sure this incremental can be applied
+#        lastsnap = snapshotDict[zfs][-1][0] # latest snapshot
+#        if lastsnap != fromsnap:
+#            raise KeyError
+#    elif zfs in snapshotDict: # make sure this zfs does not already exist
+#            raise ValueError
+    return ['zfs', 'receive', zfs]
 
 def sort_sources(srcs, sourceOrder):
     'sort according to sourceOrder, and the remainder alphabetically'
