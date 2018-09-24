@@ -205,3 +205,13 @@ git merge at the level of a submodule will work beautifully, because FILES list 
 * collisions that have no auto-merge rule get raised as conflicts requiring manual resolution, same as in Git.
 
 
+Expanding this git-frontend model
+------------------------------------------------
+
+Of course, there is no reason why this idea can only be used for ZFS.  What's exciting about this is that it will work with ANY kind of remote and ANY kind of transport.  For example:
+
+* the same approach would work with any file system.  I could sync a directory-tree on my phone by seeing what files changed on both sides and doing the usual 3-way merge.
+
+
+
+
