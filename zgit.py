@@ -19,17 +19,17 @@ def datesnap_name(dt=None, fmt='%y%m%d%H%M'):
 
 def get_snapshot_dict(cmd=['zfs', 'list', '-H', '-t', 'snapshot', '-o',
                            'name,guid,creation,org.zgit:commitmsg'],
-                      cmd1=['zfs', 'list', '-H', '-d', '0', '-o', 'name']):
+                      cmd1=['zfs', 'list', '-H', '-o', 'name']):
     'get dict of file systems each with time-ordered list of snapshots'
     d = {}
     for name in subprocess.check_output(cmd1).split('\n')[:-1]:
-        d[name] = [] # create empty entry for each top-level ZFS filesystem
+        d[name] = [] # create empty entry for each ZFS filesystem
     for s in subprocess.check_output(cmd).split('\n')[:-1]:
         name, guid, creation, commitMsg = s.split('\t')
         if commitMsg == '-':
             commitMsg = None
         fs, snap = name.split('@')
-        d.setdefault(fs, []).append((snap, guid, creation, commitMsg))
+        d[fs].append((snap, guid, creation, commitMsg))
     return d
 
 
@@ -149,9 +149,25 @@ def push_root(src, dest, newsnap, cmd='zfs send %s|zfs receive %s'):
     subprocess.check_call(cmd % (newname, dest), shell=True)
 
 
-def zfs_dest_is_creatable(dest, snapshotDict):
+def dest_zpool_exists(dest, snapshotDict):
     'check whether dest root available, so we can create dest'
     return dest.split('/')[0] in snapshotDict
+
+def create_missing_parents(dest, snapshotDict):
+    'ensure that parent filesystems exist'
+    l = dest.split('/')
+    for end in range(2, len(l)): # don't try to create root or dest!
+        parent = '/'.join(l[:end])
+        if parent not in snapshotDict:
+            create_filesystem(parent)
+            snapshotDict[parent] = [] # register repo with no snapshots
+
+def clone_initial_snapshot(src, dest, snapshotDict, cloneSnap=0):
+    'copy src[cloneSnap] snapshot to dest and register it'
+    print 'Creating %s by cloning initial snapshot...' % dest
+    create_missing_parents(dest, snapshotDict) # ensure parents exist
+    push_root(src, dest, snapshotDict[src][cloneSnap][0])
+    snapshotDict[dest] = [snapshotDict[src][cloneSnap]] # register new clone
 
 def find_ff_start(src, dest, snapshotDict=None, createIfMissing=False,
                   cloneSnap=0):
@@ -163,9 +179,8 @@ def find_ff_start(src, dest, snapshotDict=None, createIfMissing=False,
     try:
         destSnaps = snapshotDict[dest]
     except KeyError: # dest filesystem does not exist
-        if createIfMissing and zfs_dest_is_creatable(dest, snapshotDict):
-            print 'Creating %s by pushing initial snapshot...' % dest
-            push_root(src, dest, srcSnaps[cloneSnap][0])
+        if createIfMissing and dest_zpool_exists(dest, snapshotDict):
+            clone_initial_snapshot(src, dest, snapshotDict, cloneSnap)
             destSnaps = snapshotDict[dest] = [srcSnaps[cloneSnap]]
         else:
             return [t[0] for t in srcSnaps], None, None, snapshotDict
@@ -233,11 +248,11 @@ def read_json_map(path=MAPPATH, autoCreate=True):
     'get map dict {SRC:[DEST1, DEST2,...], SRC:[DEST1,...]}'
     return read_json_config(path, autoCreate)['backupMap']
 
-def write_json_config(configDict, path=MAPPATH):
+def write_json_config(configDict, path=MAPPATH, indent=2):
     'write config dict'
     path = os.path.expanduser(path)
     with open(path, 'w') as ifile:
-        json.dump(configDict, ifile)
+        json.dump(configDict, ifile, indent=indent)
 
 def write_json_map(backupMap, path=MAPPATH):
     'write backup map dict {SRC:[DEST1, DEST2,...], SRC:[DEST1,...]}'
@@ -623,6 +638,8 @@ def get_clone_args():
                         help='#most recent commits to clone (or 0 for all)')
     cloneP.add_argument('--many', nargs='*',
                         help='Multiple ZFS paths to clone')
+    cloneP.add_argument('--all', action='store_true', 
+                        help='Clone all available mappings registered in .zgit_conf.json')
     cloneP.add_argument('origin', nargs='?', default=None,
                         help='ZFS path to clone')
     cloneP.add_argument('dest', nargs='?', default='//',
@@ -634,13 +651,15 @@ def clone_cmd():
     args = get_clone_args()
     backupMap = read_json_map()
     snapshotDict = get_snapshot_dict()
-    if args.many:
+    if args.all:
+        clone_all(args.origin, backupMap, snapshotDict, args.keep)
+    elif args.many:
         for src in args.many:
             do_clone(src, args.dest, backupMap, snapshotDict, args.keep)
     elif args.origin:
         do_clone(args.origin, args.dest, backupMap, snapshotDict, args.keep)
     else:
-        raise ValueError('You must supply a ZFS path as origin or --many')
+        raise ValueError('You must supply a ZFS path as origin or --many or --all')
     write_json_map(backupMap)
     return 0
 
@@ -648,10 +667,21 @@ def do_clone(src, dest, backupMap, snapshotDict, keep=0, remoteName='origin'):
     'clone a ZFS repo and record it as origin of new copy'
     if dest == '//': # default to basename of origin
         dest = get_zfs_name() + '/' + src.split('/')[-1]
-    push_root(src, dest, snapshotDict[src][-keep][0]) # push first snapshot
+    clone_initial_snapshot(src, dest, snapshotDict, -keep) # pull first snapshot
     update_dest(src, dest, snapshotDict) # update to match src HEAD
     add_backup_mapping(dest, src, remoteName, backupMap) # add src as origin of dest
     
+def clone_all(origin, backupMap, snapshotDict, keep=0):
+    'clone all available ZFS repos registered in backupMap, filtered by origin if given'
+    targets = list(backupMap)
+    targets.sort() # ensure parent filesystems before children
+    for target in targets:
+        if dest_zpool_exists(target, snapshotDict) and target not in snapshotDict: # could create target
+            for name, src in backupMap[target]:
+                if (not origin or src.startswith(origin)) and snapshotDict.get(src): # available and has at least one snapshot
+                    clone_initial_snapshot(src, target, snapshotDict, -keep) # pull first snapshot
+                    update_dest(src, target, snapshotDict) # update to match src HEAD
+                    break # success, so stop searching
 
 ########################################################################
 # log command
